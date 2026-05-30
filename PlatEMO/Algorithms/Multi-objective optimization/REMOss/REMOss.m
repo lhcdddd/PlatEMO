@@ -1,4 +1,4 @@
-classdef REMO < ALGORITHM
+classdef REMOss < ALGORITHM
 % <2022> <multi/many> <real> <expensive>
 % Expensive multiobjective optimization by relation learning and prediction
 % k    ---    6 --- Number of reference solutions
@@ -52,12 +52,56 @@ classdef REMO < ALGORITHM
                 TestIn_nor = mapminmax('apply',TestIn',TrainIn_struct)';
                 TestPre    = onehotconv(net(TestIn_nor')',2);             
                 p_err      = sum(TestPre ~= TestOut)/size(TestPre,1);
+                
+                % --- New Mechanism: F1 and FNR calculation ---
+                % Positive class is considered as 1 (C1 > C2)
+                TP = sum((TestOut == 1) & (TestPre == 1));
+                FP = sum((TestOut ~= 1) & (TestPre == 1));
+                FN = sum((TestOut == 1) & (TestPre ~= 1));
+                TN = sum((TestOut ~= 1) & (TestPre ~= 1));
+                
+                Precision = TP / max(TP + FP, 1);
+                Recall    = TP / max(TP + FN, 1);
+                F1        = 2 * Precision * Recall / max(Precision + Recall, 1e-6);
+                FNR       = FN / max(TP + FN, 1);
+                
+                % R1, R2, R3 Mode decision
+                F1_th = 0.5;
+                FNR_th = 0.4;
+                if F1 >= F1_th && FNR <= FNR_th
+                    mode = 1;  % R1: Trust mode
+                elseif FNR > FNR_th
+                    mode = -1; % R2: Reverse mode
+                else
+                    mode = 0;  % R3: Discard mode
+                end
+                
+                % Time factor and ksc (Fix 1)
+                t = Problem.FE / Problem.maxFE;
+                w = max(0.2, 1 - t^2); % Non-linear decay with a lower bound
+                
+                if mode == 1
+                    C = F1;      % Trust normal prediction
+                elseif mode == -1
+                    C = FNR;     % Trust inverted prediction (higher FNR = more trust in reverse)
+                else
+                    C = 0;       % Discard
+                end
+                ksc = C * w;
+                
+                % Append info to a log file
+                fileID = fopen('e:\PlatEMO\REMOss_debug_log.txt', 'a');
+                fprintf(fileID, 'FE: %d/%d | F1: %.4f | FNR: %.4f | mode: %d | w: %.4f | ksc: %.4f\n', Problem.FE, Problem.maxFE, F1, FNR, mode, w, ksc);
+                fclose(fileID);
+                
                 Smodel.X   = Input;
                 Smodel.Y   = Catalog;
                 Smodel.mp_struct = TrainIn_struct;
                 Smodel.net       = net;
                 Smodel.p_err     = p_err;
-                Next = RSurrogateAssistedSelection(Problem,Ref,Population.decs,gmax,Smodel);
+                Smodel.ksc       = ksc;
+                Smodel.mode      = mode;
+                Next = RSurrogateAssistedSelection(Problem,Ref,Population.decs,gmax,Smodel,Archive.decs);
                 if ~isempty(Next)
                     Archive = [Archive,Problem.Evaluation(Next)];
                 end
